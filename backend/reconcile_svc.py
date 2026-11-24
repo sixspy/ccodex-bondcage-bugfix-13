@@ -1,4 +1,5 @@
-"""对账互证：笼面可用 + 已拨付 + 已罚没 须等于笼面金额（同代口径）。"""
+"""对账互证：笼面可用 + 已拨付 + 已罚没 须等于笼面金额（同代口径），
+且拨付凭证收款方须与笼面受益人名册同侧 —— 撕扯即失衡，禁止假绿。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
@@ -25,7 +26,15 @@ def _reconcile_cage(conn, cage) -> dict:
         (cage_id, gen),
     ).fetchone()["s"]
     accounted = round(float(available) + float(released) + float(forfeited), 6)
-    ok = abs(accounted - amount) < 1e-6
+    amounts_ok = abs(accounted - amount) < 1e-6
+    # 名册口径：已拨付凭证收款方必须与笼面最新受益人同侧，撕扯即失衡
+    stale = conn.execute(
+        """SELECT id, payee, release_ref FROM releases
+           WHERE cage_id=? AND status='已拨付' AND payee<>?""",
+        (cage_id, cage["beneficiary"]),
+    ).fetchall()
+    roster_consistent = len(stale) == 0
+    ok = amounts_ok and roster_consistent
     # 账户侧：该当事人冻结额应覆盖所有仍冻结/核验中的笼可用
     party = cage["party_key"]
     acct = conn.execute(
@@ -51,11 +60,14 @@ def _reconcile_cage(conn, cage) -> dict:
         "accounted": accounted,
         "balanced": ok,
         "gap": round(amount - accounted, 6),
+        "beneficiary": cage["beneficiary"],
+        "roster_consistent": roster_consistent,
+        "payee_mismatch": [dict(s) for s in stale],
         "account_balance": float(acct["balance"]) if acct else None,
         "account_frozen": float(acct["frozen"]) if acct else None,
         "live_cage_available": float(live_frozen),
         "proof": {
-            "formula": "available + released + forfeited == amount（同笼代）",
+            "formula": "available + released + forfeited == amount（同笼代）；凭证收款方 == 笼面受益人（名册同侧）",
             "left": accounted,
             "right": amount,
         },

@@ -16,22 +16,24 @@ class LockIn(BaseModel):
 
 
 def try_acquire(conn, lock_key: str, holder: str) -> bool:
+    """原子抢锁：并发双请求同抢一个键时，INSERT OR IGNORE 串行化，
+    后到者落争用痕，杜绝 SELECT-then-INSERT 撞主键变 500。"""
     now = now_iso()
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO cage_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
+        (lock_key, holder, now),
+    )
+    if cur.rowcount == 1:
+        return True
     row = conn.execute(
         "SELECT holder FROM cage_locks WHERE lock_key=?", (lock_key,)
     ).fetchone()
-    if row is None:
-        conn.execute(
-            "INSERT INTO cage_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
-            (lock_key, holder, now),
-        )
-        return True
-    if row["holder"] == holder:
+    if row is not None and row["holder"] == holder:
         return True
     conn.execute(
         """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
            VALUES (?,?,?,?,?)""",
-        (lock_key, holder, "争用", f"持有者={row['holder']}", now),
+        (lock_key, holder, "争用", f"持有者={row['holder'] if row else '?'}", now),
     )
     return False
 

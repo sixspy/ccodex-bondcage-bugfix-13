@@ -1,14 +1,27 @@
-"""入笼冻结：可用保证金划入笼内，写笼代。"""
+"""入笼冻结：可用保证金划入笼内，写笼代；笼面受益人改口也走这里。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release, require_lock, try_acquire
 from models import CageFreezeIn
 
 router = APIRouter(tags=["cages"])
+
+FATE_OPEN = "已冻结未入审：受益人可改"
+FATE_LOCKED = "入审锁册：受益人当日不得改口"
+
+
+class BeneficiaryChangeIn(BaseModel):
+    beneficiary: str = Field(min_length=2, max_length=128)
+
+
+def _beneficiary_fate(status: str) -> str:
+    """快照命运说明：入审锁册后当日不得改口。"""
+    return FATE_OPEN if status == "已冻结" else FATE_LOCKED
 
 
 def _next_cage_code(conn, party_key: str) -> str:
@@ -52,10 +65,74 @@ def get_cage(cage_id: int, authorization: AuthHeader = None):
         ).fetchall()
         return {
             "cage": dict(cage),
+            "beneficiary_fate": _beneficiary_fate(cage["status"]),
             "attestations": [dict(a) for a in atts],
             "releases": [dict(r) for r in rels],
             "forfeits": [dict(f) for f in fors],
         }
+
+
+@router.post("/api/cages/{cage_id}/beneficiary")
+def change_beneficiary(
+    cage_id: int, body: BeneficiaryChangeIn, authorization: AuthHeader = None
+):
+    """柜面改受益人全称：与同笼出金抢同一把笼锁，后到争用只记痕；
+    快照命运：入审锁册后当日不得改口。"""
+    user = require_writer(authorization)
+    lock_key = f"cage:{cage_id}"
+    with connect() as conn:
+        if not try_acquire(conn, lock_key, user):
+            conn.commit()  # 争用痕落库，业务零写
+            raise HTTPException(409, "争用：后到只记争用，不写业务")
+        try:
+            cage = conn.execute(
+                "SELECT * FROM cages WHERE id=?", (cage_id,)
+            ).fetchone()
+            if not cage:
+                raise HTTPException(404, "笼不存在")
+            old = cage["beneficiary"]
+            new = body.beneficiary.strip()
+            if cage["status"] != "已冻结":
+                # 快照命运：入审锁册后当日不得改口，改口企图落审计
+                write_audit(
+                    conn,
+                    user,
+                    "cage_beneficiary_fate",
+                    cage["cage_code"],
+                    {
+                        "old": old,
+                        "wanted": new,
+                        "status": cage["status"],
+                        "decision": "拒：入审锁册当日不得改口",
+                    },
+                )
+                conn.commit()
+                raise HTTPException(409, "入审锁册：受益人当日不得改口")
+            conn.execute(
+                "UPDATE cages SET beneficiary=? WHERE id=?", (new, cage_id)
+            )
+            write_audit(
+                conn,
+                user,
+                "cage_beneficiary_change",
+                cage["cage_code"],
+                {
+                    "old": old,
+                    "new": new,
+                    "generation": int(cage["generation"]),
+                    "fate": "已冻结未入审可改；入审锁册后当日不得改口",
+                },
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM cages WHERE id=?", (cage_id,)
+            ).fetchone()
+            out = dict(row)
+            out["beneficiary_fate"] = _beneficiary_fate(out["status"])
+            return out
+        finally:
+            release(conn, lock_key, user)
+            conn.commit()
 
 
 @router.post("/api/cages/freeze")

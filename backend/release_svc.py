@@ -1,11 +1,16 @@
-"""解笼拨付：核验通过后把笼内可用额拨付给受益人。"""
+"""解笼拨付：核验通过后把笼内可用额拨付给受益人。
+
+甲路径口径：写拨付前必须重读笼面最新受益人快照；请求携带的旧快照
+对不上则记「快照过期偏航」，正式零增拒写并回滚解笼草稿。
+受益快照只走笼面名册一侧，不与请求缓存名混用。
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release, try_acquire
 from models import ReleaseIn
 
 router = APIRouter(tags=["release"])
@@ -16,7 +21,7 @@ def list_releases(authorization: AuthHeader = None):
     require_user(authorization)
     with connect() as conn:
         rows = conn.execute(
-            """SELECT r.*, c.cage_code, c.contract_no
+            """SELECT r.*, c.cage_code, c.contract_no, c.beneficiary AS cage_beneficiary
                FROM releases r
                JOIN cages c ON c.id=r.cage_id
                ORDER BY r.id DESC LIMIT 200"""
@@ -29,7 +34,9 @@ def do_release(body: ReleaseIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
     lock_key = f"cage:{body.cage_id}"
     with connect() as conn:
-        require_lock(conn, lock_key, user)
+        if not try_acquire(conn, lock_key, user):
+            conn.commit()  # 争用痕落库，业务零写
+            raise HTTPException(409, "争用：后到只记争用，不写业务")
         try:
             cage = conn.execute(
                 "SELECT * FROM cages WHERE id=?", (body.cage_id,)
@@ -53,17 +60,36 @@ def do_release(body: ReleaseIn, authorization: AuthHeader = None):
                 raise HTTPException(400, "拨付金额须大于 0")
             if amount > avail + 1e-9:
                 raise HTTPException(409, "拨付金额超过笼可用额")
-            # BUGFIX-13 埋雷：不重读笼面受益人，沿用请求体旧名或陈旧快照
-            stale = conn.execute(
+            gen = int(cage["generation"])
+            # 甲路径：写拨付前重读笼面最新受益人快照
+            fresh = conn.execute(
                 "SELECT beneficiary FROM cages WHERE id=?", (body.cage_id,)
             ).fetchone()
-            payee = body.payee or (stale["beneficiary"] if stale else "")
-            # 故意再用一次创建前缓存名覆盖
-            payee = cage["beneficiary"] if not body.payee else body.payee
-            if body.payee is None:
-                payee = cage["beneficiary"]  # 未重读最新受益人
+            current_beneficiary = fresh["beneficiary"] if fresh else ""
+            if body.payee and body.payee != current_beneficiary:
+                # 旧快照作废：正式零增拒写并回滚解笼草稿，记快照过期偏航
+                write_audit(
+                    conn,
+                    user,
+                    "快照过期偏航",
+                    cage["cage_code"],
+                    {
+                        "stale_payee": body.payee,
+                        "current_beneficiary": current_beneficiary,
+                        "amount": amount,
+                        "cage_generation": gen,
+                        "decision": "零增拒写并回滚解笼草稿",
+                    },
+                )
+                conn.commit()  # 只落偏航痕，拨付册零增、笼面不动
+                raise HTTPException(
+                    409,
+                    "快照过期偏航：收款方快照与笼面最新受益人不符，"
+                    "已零增拒写并回滚解笼草稿",
+                )
+            # 受益快照只走笼面名册一侧，不与请求缓存名混用
+            payee = current_beneficiary
             now = now_iso()
-            gen = int(cage["generation"])
             ref = f"REL-{cage['cage_code']}-g{gen}-{int(now.replace(':', '').replace('-', '').replace('T', '')[-8:])}"
             cur = conn.execute(
                 """INSERT INTO releases(cage_id,amount,payee,cage_generation,status,release_ref,created_at)

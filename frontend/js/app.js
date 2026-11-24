@@ -76,6 +76,11 @@ createApp({
       amount: null,
       payee: "",
     });
+    const beneficiaryForm = ref({
+      cage_id: 0,
+      beneficiary: "",
+    });
+    const releaseCageFace = ref(null);
     const forfeitForm = ref({
       cage_id: 0,
       amount: null,
@@ -225,6 +230,12 @@ createApp({
         if (!releaseForm.value.cage_id && passCages.value.length) {
           releaseForm.value.cage_id = passCages.value[0].id;
         }
+        if (releaseForm.value.cage_id) {
+          await loadReleaseCageFace();
+        }
+        if (!beneficiaryForm.value.cage_id && frozenCages.value.length) {
+          beneficiaryForm.value.cage_id = frozenCages.value[0].id;
+        }
         if (!forfeitForm.value.cage_id && failCages.value.length) {
           forfeitForm.value.cage_id = failCages.value[0].id;
         }
@@ -318,8 +329,38 @@ createApp({
         if (releaseForm.value.amount) payload.amount = releaseForm.value.amount;
         if (releaseForm.value.payee) payload.payee = releaseForm.value.payee;
         const row = await api.release(payload);
-        flashOk(`拨付成功 ${row.release_ref}`);
+        flashOk(`拨付成功 ${row.release_ref} → ${row.payee}`);
+        releaseForm.value.payee = "";
         await refresh();
+      } catch (e) {
+        flashErr(e);
+      }
+    }
+
+    async function loadReleaseCageFace() {
+      releaseCageFace.value = null;
+      if (!releaseForm.value.cage_id) return;
+      try {
+        const detail = await api.cage(releaseForm.value.cage_id);
+        releaseCageFace.value = detail.cage;
+      } catch (e) {
+        flashErr(e);
+      }
+    }
+
+    async function changeBeneficiary() {
+      clearFlash();
+      try {
+        if (!beneficiaryForm.value.cage_id) throw new Error("请选择已冻结笼");
+        if (!beneficiaryForm.value.beneficiary) throw new Error("请填新受益人全称");
+        const row = await api.changeBeneficiary(beneficiaryForm.value.cage_id, {
+          beneficiary: beneficiaryForm.value.beneficiary,
+        });
+        flashOk(`受益人已改：${row.beneficiary}（${row.beneficiary_fate}）`);
+        beneficiaryForm.value.beneficiary = "";
+        await refresh();
+        const still = cages.value.find((x) => x.id === row.id);
+        if (still) await selectCage(still);
       } catch (e) {
         flashErr(e);
       }
@@ -422,6 +463,8 @@ createApp({
       freezeForm,
       attestForm,
       releaseForm,
+      beneficiaryForm,
+      releaseCageFace,
       forfeitForm,
       topupForm,
       splitForm,
@@ -441,6 +484,8 @@ createApp({
       selectCage,
       doAttest,
       doRelease,
+      loadReleaseCageFace,
+      changeBeneficiary,
       doForfeit,
       loadReconcile,
       loadProof,

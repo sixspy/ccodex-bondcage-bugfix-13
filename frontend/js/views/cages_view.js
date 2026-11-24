@@ -33,6 +33,26 @@ export const cagesViewTemplate = `
         <button @click="freezeCage">入笼冻结</button>
         <button class="secondary" @click="refresh">刷新</button>
       </div>
+      <h3>笼面改受益人</h3>
+      <p class="hint">已冻结未入审可改；入审锁册后当日不得改口。改受益与同笼出金抢同一把笼锁，后到争用只记痕。</p>
+      <div class="form-row">
+        <div>
+          <label>已冻结笼</label>
+          <select v-model.number="beneficiaryForm.cage_id">
+            <option :value="0">请选择</option>
+            <option v-for="c in frozenCages" :key="c.id" :value="c.id">
+              {{ c.cage_code }} · 现名 {{ c.beneficiary }}
+            </option>
+          </select>
+        </div>
+        <div>
+          <label>新受益人全称</label>
+          <input v-model="beneficiaryForm.beneficiary" placeholder="更名后的受益人全称"/>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="ok" @click="changeBeneficiary">改受益人</button>
+      </div>
     </div>
     <div>
       <div class="cage-cards">
@@ -59,6 +79,8 @@ export const cagesViewTemplate = `
       <tbody>
         <tr><td>状态</td><td><span class="badge" :class="statusClass(cageDetail.cage.status)">{{ cageDetail.cage.status }}</span></td></tr>
         <tr><td>可用 / 总额</td><td>{{ fmt(cageDetail.cage.available) }} / {{ fmt(cageDetail.cage.amount) }}</td></tr>
+        <tr><td>受益人</td><td>{{ cageDetail.cage.beneficiary }}</td></tr>
+        <tr><td>快照命运</td><td>{{ cageDetail.beneficiary_fate }}</td></tr>
         <tr><td>核验条数</td><td>{{ cageDetail.attestations.length }}</td></tr>
         <tr><td>拨付条数</td><td>{{ cageDetail.releases.length }}</td></tr>
         <tr><td>罚没条数</td><td>{{ cageDetail.forfeits.length }}</td></tr>
